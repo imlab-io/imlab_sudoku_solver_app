@@ -163,24 +163,7 @@ void fill_sudoku_grid(matrix_t *prediction, int grid[9][9])
     }    
 }
 
-struct glm_t **glm_multiclass_read(const char *filename, uint32_t n_stage)
-{
-    char filename_numbered[256];
-
-    // create output glm net
-    struct glm_t **net = (struct glm_t **)malloc(n_stage * sizeof(struct glm_t *));
-
-    uint32_t stage = 0;
-    for (stage = 0; stage < n_stage; stage++)
-    {
-        sprintf(filename_numbered, "%s_%d.glm", filename, stage);
-        net[stage] = glm_read(filename_numbered);
-    }
-
-    return net;
-}
-
-void predict_multiclass(matrix_t *feature, matrix_t *label, struct glm_t **net, uint32_t n_stage)
+void predict_multiclass(matrix_t *feature, matrix_t *label, struct ann_t *net)
 {
     uint32_t n_class = cols(label);
     uint32_t n_sample = rows(feature);
@@ -188,20 +171,17 @@ void predict_multiclass(matrix_t *feature, matrix_t *label, struct glm_t **net, 
     // create an temporary output matrix
     matrix_t *output = matrix_create(float, n_sample, n_class);
 
-    // train a glm classifier for each stage
-    uint32_t stage = 0, sample = 0, class = 0;
-    for (stage = 0; stage < n_stage; stage++)
-    {
-        // get the predictions
-        glm_predict(feature, output, net[stage]);
+    // train a ann classifier for each stage
+    uint32_t sample = 0, class = 0;
+    // get the predictions
+    ann_predict(feature, output, net);
 
-        // find the class label for each sample and class
-        for (sample = 0; sample < n_sample; sample++)
+    // find the class label for each sample and class
+    for (sample = 0; sample < n_sample; sample++)
+    {
+        for (class = 0; class < n_class; class ++)
         {
-            for (class = 0; class < n_class; class ++)
-            {
-                atf(label, sample, class) += atf(output, sample, class);
-            }
+            atf(label, sample, class) += atf(output, sample, class);
         }
     }
 
@@ -209,22 +189,23 @@ void predict_multiclass(matrix_t *feature, matrix_t *label, struct glm_t **net, 
     matrix_free(&output);
 }
 
-
 // given grayscale aligned and scaled (360x360x1) sudoku image, fills the grid
 void recognize_digits(matrix_t *sudoku, int grid[9][9])
 {
-    uint32_t nstage = 5;
     int CellSize = 40;
-    struct feature_t *extractor = feature_create(CV_LBP, CellSize, CellSize, 1, "-block:4x4 -uniform:3");
-    struct glm_t **testNet = glm_multiclass_read("..//data//digit_recognition_model", nstage);
 
-    //struct feature_t *extractor = feature_create(CV_HOG, CellSize, CellSize, "-bins:18 -cell:4x4 -block:1x1  -stride:1x1");
-    //struct glm_t *testNet = glm_read("..//data//digit_recognition_model_hog.net");
+    struct feature_t *extractor = feature_create(CV_HOG, CellSize, CellSize, 1, "-block:2x2 -cell:4x4 -stride:1x1 -nbins:18");
+
+    struct ann_t *testNet = ann_read("..//data//trained_model.ann");
 
     // allocate space for the features
     matrix_t *features = matrix_create(float, 81, feature_size(extractor), 1);
 
-    // allocate space for temp cell image
+    // allocate space for gray scale image
+    matrix_t *sudokuGray = matrix_create(uint8_t, rows(sudokuGray), cols(sudokuGray), 1);
+    rgb2gray(sudoku, sudokuGray);
+
+     // allocate space for temp cell image
     matrix_t *cellImage = matrix_create(uint8_t, CellSize, CellSize, 1);
 
     int i = 0, j = 0, idx = 0;
@@ -233,7 +214,9 @@ void recognize_digits(matrix_t *sudoku, int grid[9][9])
         for (j = 0; j < 9; j++)
         {
             struct rectangle_t crop_region = rectangle(j * CellSize, i * CellSize, CellSize, CellSize, 0);
-            imcrop(sudoku, crop_region, cellImage);
+            imcrop(sudokuGray, crop_region, cellImage);
+
+            // imwrite(cellImage, imlab_filename("test//digit","bmp"));
 
             // extract the feature of the cell i,j and write it into the idx th row of the feature vector
             feature_extract(cellImage, extractor, data(float, features, idx++, 0));
@@ -244,10 +227,13 @@ void recognize_digits(matrix_t *sudoku, int grid[9][9])
     matrix_t *label_predicted = matrix_create(float, 81, 10, 1);
 
     // do classification/regression
-    predict_multiclass(features, label_predicted, testNet, nstage);
+    predict_multiclass(features, label_predicted, testNet);
 
     // fill the grid using the resulting scores
     fill_sudoku_grid(label_predicted, grid);
+
+    // clean the grayscale copy of the image
+    matrix_free(&sudokuGray);
 }
 
 // find the hough peaks and return it as a vector
@@ -288,7 +274,7 @@ vector_t *find_hough_peaks(vector_t *keyPoints, uint32_t width, uint32_t height)
     {
         for(rho = 0; rho < cols(hough); rho++)
         {
-            if(atf(hough, theta, rho) > 0.4 * min(width,height))
+            if(atf(hough, theta, rho) > 0.4 * minimum(width,height))
             {
                 struct point_t p = point(rho - mapSizeHalf, theta + minTheta,0);
                 vector_push(candidates, &p);
